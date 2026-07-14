@@ -3,6 +3,8 @@
 //! # Example
 //!
 //! ```
+//! # #[cfg(feature = "alloc")]
+//! # fn main() {
 //! extern crate aes;
 //! extern crate fpe;
 //!
@@ -19,6 +21,9 @@
 //!
 //! let p2 = ff.decrypt(&[], &ct).unwrap();
 //! assert_eq!(p2.to_bytes_le(), pt);
+//! # }
+//! # #[cfg(not(feature = "alloc"))]
+//! # fn main() {}
 //! ```
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]

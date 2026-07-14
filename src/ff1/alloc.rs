@@ -97,7 +97,7 @@ impl NumeralString for FlexibleNumeralString {
     type Ops = Self;
 
     fn is_valid(&self, radix: u32) -> bool {
-        self.0.iter().all(|n| (u32::from(*n) < radix))
+        self.0.iter().all(|n| u32::from(*n) < radix)
     }
 
     fn numeral_count(&self) -> usize {
@@ -297,7 +297,7 @@ impl NumeralString for BinaryNumeralString {
             // Simple case: no shifting necessary, just reversing and joining.
             b.data
                 .into_iter()
-                .chain(a.data.into_iter())
+                .chain(a.data)
                 .map(|b| b.reverse_bits())
                 .rev()
                 .collect()

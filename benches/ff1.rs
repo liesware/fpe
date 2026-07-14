@@ -5,25 +5,25 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use criterion_cycles_per_byte::CyclesPerByte;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-type Criterion_ = Criterion<CyclesPerByte>;
+type BenchCriterion = Criterion<CyclesPerByte>;
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-type Criterion_ = Criterion;
+type BenchCriterion = Criterion;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn setup_criterion() -> Criterion_ {
+fn setup_criterion() -> BenchCriterion {
     Criterion::default().with_measurement(CyclesPerByte)
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-fn setup_criterion() -> Criterion_ {
+fn setup_criterion() -> BenchCriterion {
     Criterion::default()
 }
 
 #[cfg(unix)]
 use pprof::criterion::{Output, PProfProfiler};
 
-fn ff1_binary_benchmark(c: &mut Criterion<CyclesPerByte>) {
+fn ff1_binary_benchmark(c: &mut BenchCriterion) {
     let bytes = vec![7; 1000];
 
     let fpe_ff = fpe::ff1::FF1::<Aes256>::new(&[0; 32], 2).unwrap();

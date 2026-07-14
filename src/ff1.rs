@@ -1,5 +1,8 @@
 //! A Rust implementation of the FF1 algorithm, specified in
 //! [NIST Special Publication 800-38G](http://dx.doi.org/10.6028/NIST.SP.800-38G).
+//!
+//! This implementation follows the FF1 updates in the 2025 second public draft
+//! of NIST SP 800-38G Revision 1.
 
 use core::cmp;
 
@@ -19,10 +22,10 @@ mod alloc;
 #[cfg(feature = "alloc")]
 pub use self::alloc::{BinaryNumeralString, FlexibleNumeralString};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod proptests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod test_vectors;
 
 /// The minimum allowed numeral string length for any radix.
@@ -32,20 +35,24 @@ const MAX_NS_LEN: usize = u32::MAX as usize;
 
 /// The minimum allowed value of radix^minlen.
 ///
-/// Defined in [NIST SP 800-38G Revision 1](https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-38Gr1-draft.pdf).
+/// Defined in [NIST SP 800-38G Revision 1 2PD](https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-38Gr1.2pd.pdf).
 const MIN_NS_DOMAIN_SIZE: u64 = 1_000_000;
 
 /// `minlen` such that `2^minlen >= MIN_NS_DOMAIN_SIZE`.
 const MIN_RADIX_2_NS_LEN: u32 = 20;
+
+const MAX_TWEAK_LEN: usize = u32::MAX as usize;
+const FIXED_LOG_BITS: u32 = 62;
+const FIXED_LOG_ONE: u128 = 1 << FIXED_LOG_BITS;
 
 #[cfg(test)]
 const_assert!((1 << MIN_RADIX_2_NS_LEN) >= MIN_NS_DOMAIN_SIZE);
 
 #[derive(Debug, PartialEq)]
 enum Radix {
-    /// A radix in [2..2^16]. It uses floating-point arithmetic.
+    /// A radix in [2..2^16].
     Any { radix: u32, min_len: u32 },
-    /// A radix 2^i for i in [1..16]. It does not use floating-point arithmetic.
+    /// A radix 2^i for i in [1..16].
     PowerTwo {
         radix: u32,
         min_len: u32,
@@ -98,9 +105,15 @@ impl Radix {
 
     /// Calculates b = ceil(ceil(v * log2(radix)) / 8).
     fn calculate_b(&self, v: usize) -> usize {
-        use libm::{ceil, log2};
         match *self {
-            Radix::Any { radix, .. } => ceil(v as f64 * log2(f64::from(radix)) / 8f64) as usize,
+            Radix::Any { radix, .. } => {
+                let scaled_log2 = fixed_log2(radix);
+                let floor_log2 = (scaled_log2 * v as u128) >> FIXED_LOG_BITS;
+
+                // For non-power-of-two radices, radix^v is never a power of 2. Therefore:
+                // ceil(log_256(radix^v)) = floor(log_2(radix^v)) / 8 + 1.
+                (floor_log2 / 8 + 1) as usize
+            }
             Radix::PowerTwo { log_radix, .. } => ((v * log_radix as usize) + 7) / 8,
         }
     }
@@ -111,6 +124,39 @@ impl Radix {
             Radix::PowerTwo { radix, .. } => radix,
         }
     }
+}
+
+fn fixed_log2(radix: u32) -> u128 {
+    debug_assert!((2..=(1 << 16)).contains(&radix));
+
+    let integer_bits = 31 - radix.leading_zeros();
+    let mut y = (u128::from(radix) << FIXED_LOG_BITS) >> integer_bits;
+    let mut fractional_bits = 0u128;
+
+    for bit in (0..FIXED_LOG_BITS).rev() {
+        y = (y * y) >> FIXED_LOG_BITS;
+        if y >= 2 * FIXED_LOG_ONE {
+            y >>= 1;
+            fractional_bits |= 1u128 << bit;
+        }
+    }
+
+    (u128::from(integer_bits) << FIXED_LOG_BITS) | fractional_bits
+}
+
+fn check_tweak_length(tweak_len: usize) -> Result<(), NumeralStringError> {
+    if tweak_len > MAX_TWEAK_LEN {
+        Err(NumeralStringError::TweakTooLong {
+            tweak_len,
+            max_len: MAX_TWEAK_LEN,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn calculate_padding(tweak_len: usize, b: usize) -> usize {
+    (16 - ((tweak_len + b + 1) % 16)) % 16
 }
 
 /// Type representing FF1 operations that can be performed on a sub-section of a
@@ -249,6 +295,7 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
 
         let n = x.numeral_count();
         let t = tweak.len();
+        check_tweak_length(t)?;
 
         // 1. Let u = floor(n / 2); v = n - u
         // 2. Let A = X[1..u]; B = X[u + 1..n].
@@ -273,7 +320,7 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
         let mut prf = Prf::new(&self.ciph);
         prf.update(&p);
         prf.update(tweak);
-        for _ in 0..((((-(t as i32) - (b as i32) - 1) % 16) + 16) % 16) {
+        for _ in 0..calculate_padding(t, b) {
             prf.update(&[0]);
         }
         for i in 0..10 {
@@ -319,6 +366,7 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
 
         let n = x.numeral_count();
         let t = tweak.len();
+        check_tweak_length(t)?;
 
         // 1. Let u = floor(n / 2); v = n - u
         // 2. Let A = X[1..u]; B = X[u + 1..n].
@@ -343,7 +391,7 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
         let mut prf = Prf::new(&self.ciph);
         prf.update(&p);
         prf.update(tweak);
-        for _ in 0..((((-(t as i32) - (b as i32) - 1) % 16) + 16) % 16) {
+        for _ in 0..calculate_padding(t, b) {
             prf.update(&[0]);
         }
         for i in 0..10 {
@@ -377,7 +425,15 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
 
 #[cfg(test)]
 mod tests {
-    use super::{InvalidRadix, Radix, MIN_NS_LEN, MIN_RADIX_2_NS_LEN};
+    use super::{
+        check_tweak_length, InvalidRadix, NumeralStringError, Radix, MAX_TWEAK_LEN, MIN_NS_LEN,
+        MIN_RADIX_2_NS_LEN,
+    };
+
+    #[cfg(feature = "alloc")]
+    use num_bigint::BigUint;
+    #[cfg(feature = "alloc")]
+    use num_traits::One;
 
     #[test]
     fn radix() {
@@ -465,5 +521,77 @@ mod tests {
             })
         );
         assert_eq!(Radix::from_u32(65537), Err(InvalidRadix(65537)));
+    }
+
+    #[test]
+    fn calculate_b_power_two_radixes() {
+        let cases = [
+            (2, 1, 1),
+            (2, 8, 1),
+            (2, 9, 2),
+            (4, 4, 1),
+            (4, 5, 2),
+            (256, 1, 1),
+            (256, 9, 9),
+            (65536, 1, 2),
+            (65536, 5, 10),
+        ];
+
+        for (radix, v, expected) in cases {
+            assert_eq!(Radix::from_u32(radix).unwrap().calculate_b(v), expected);
+        }
+    }
+
+    #[test]
+    fn calculate_b_non_power_two_radixes() {
+        let cases = [
+            (3, 1, 1),
+            (3, 5, 1),
+            (3, 6, 2),
+            (10, 2, 1),
+            (10, 3, 2),
+            (10, 5, 3),
+            (10, 6, 3),
+            (36, 1, 1),
+            (36, 4, 3),
+            (65535, 1, 2),
+            (65535, 2, 4),
+        ];
+
+        for (radix, v, expected) in cases {
+            assert_eq!(Radix::from_u32(radix).unwrap().calculate_b(v), expected);
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn calculate_b_matches_biguint_oracle() {
+        let radixes = [
+            3, 5, 7, 10, 11, 16, 31, 36, 37, 127, 255, 256, 257, 1023, 4096, 65535, 65536,
+        ];
+
+        for radix in radixes {
+            let radix = Radix::from_u32(radix).unwrap();
+            let radix_u32 = radix.to_u32();
+            let mut domain = BigUint::one();
+            for v in 1..=128 {
+                domain *= radix_u32;
+                let max_value = &domain - BigUint::one();
+                let expected = (max_value.bits() as usize + 7) / 8;
+                assert_eq!(radix.calculate_b(v), expected, "radix={radix_u32}, v={v}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_tweak_lengths_that_do_not_fit_in_p() {
+        assert_eq!(check_tweak_length(MAX_TWEAK_LEN), Ok(()));
+        assert_eq!(
+            check_tweak_length(MAX_TWEAK_LEN.saturating_add(1)),
+            Err(NumeralStringError::TweakTooLong {
+                tweak_len: MAX_TWEAK_LEN.saturating_add(1),
+                max_len: MAX_TWEAK_LEN,
+            })
+        );
     }
 }

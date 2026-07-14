@@ -32,6 +32,13 @@ pub enum NumeralStringError {
         /// The minimum length allowed (in numerals) for a numeral string of its radix.
         min_len: usize,
     },
+    /// The tweak was longer than FF1 can encode in its parameter block.
+    TweakTooLong {
+        /// The length of the tweak.
+        tweak_len: usize,
+        /// The maximum tweak length encodable by FF1.
+        max_len: usize,
+    },
 }
 
 impl fmt::Display for NumeralStringError {
@@ -49,6 +56,11 @@ impl fmt::Display for NumeralStringError {
                 f,
                 "The given numeral string is too short for FF1 ({} < {})",
                 ns_len, min_len,
+            ),
+            NumeralStringError::TweakTooLong { tweak_len, max_len } => write!(
+                f,
+                "The given tweak is too long for FF1 ({} > {})",
+                tweak_len, max_len,
             ),
         }
     }

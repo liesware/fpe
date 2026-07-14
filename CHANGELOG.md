@@ -6,6 +6,11 @@ and this library adheres to Rust's notion of
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- Added compatibility updates for the 2025 second public draft of NIST SP
+  800-38G Revision 1: FF1 parameter calculation no longer uses floating-point
+  arithmetic, and tweaks longer than the FF1 parameter block can encode are now
+  rejected.
 
 ## [0.6.1] - 2023-04-13
 ### Fixed

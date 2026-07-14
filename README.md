@@ -4,7 +4,9 @@ This crate contains pure-Rust implementations of format-preserving encryption
 algorithms.
 
 The following algorithms are implemented:
-- FF1 (specified in [NIST Special Publication 800-38G](http://dx.doi.org/10.6028/NIST.SP.800-38G)).
+- FF1 (specified in [NIST Special Publication 800-38G](http://dx.doi.org/10.6028/NIST.SP.800-38G), with compatibility updates from the [2025 second public draft of Revision 1](https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-38Gr1.2pd.pdf)).
+
+This crate does not implement FF3 or FF3-1.
 
 This crate requires Rust version 1.56 or greater.
 
