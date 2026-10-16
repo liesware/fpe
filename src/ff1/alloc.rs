@@ -5,20 +5,9 @@ use core::iter;
 use alloc::{vec, vec::Vec};
 
 use num_bigint::{BigInt, BigUint, Sign};
-use num_traits::{
-    identities::{One, Zero},
-    ToPrimitive,
-};
+use num_traits::{Pow, ToPrimitive, identities::Zero};
 
 use super::{NumeralString, Operations};
-
-fn pow(x: u32, e: usize) -> BigUint {
-    let mut res = BigUint::one();
-    for _ in 0..e {
-        res *= x;
-    }
-    res
-}
 
 /// Extension trait adding FF1-relevant methods to `BigUint`.
 trait Numeral {
@@ -55,18 +44,18 @@ impl Numeral for BigUint {
             let mut bytes = self.to_bytes_le();
             let padding = b - bytes.len();
             bytes.reserve_exact(padding);
-            bytes.extend(iter::repeat(0).take(padding));
+            bytes.extend(iter::repeat_n(0, padding));
             bytes.reverse();
             bytes
         }
     }
 
     fn add_mod_exp(self, other: Self, radix: u32, m: usize) -> Self {
-        (self + other) % pow(radix, m)
+        (self + other) % BigUint::from(radix).pow(m)
     }
 
     fn sub_mod_exp(self, other: Self, radix: u32, m: usize) -> Self {
-        let modulus = BigInt::from(pow(radix, m));
+        let modulus = BigInt::from(radix).pow(m);
         let mut c = (BigInt::from(self) - BigInt::from(other)) % &modulus;
         if c.sign() == Sign::Minus {
             // use ((x % m) + m) % m to ensure it is in range
@@ -171,7 +160,7 @@ impl BinaryNumeralString {
         BinaryNumeralString(s.to_vec())
     }
 
-    /// Returns a Vec<u8>, with each byte written from the BinaryNumeralString
+    /// Returns a Vec, with each byte written from the BinaryNumeralString
     /// in little-endian bit order.
     pub fn to_bytes_le(&self) -> Vec<u8> {
         self.0.to_vec()
@@ -194,7 +183,7 @@ impl NumeralString for BinaryNumeralString {
         let n = self.numeral_count();
         let u = n / 2;
         let v = n - u;
-        let a_end = (u + 7) / 8;
+        let a_end = u.div_ceil(8);
         let b_start = u / 8;
 
         // FF1 processes the two halves of a numeral string as big-endian integers in the
@@ -384,7 +373,7 @@ impl Operations for BinaryOps {
 
 impl BinaryOps {
     fn new(data: Vec<u8>, num_bits: usize) -> Self {
-        assert_eq!(data.len(), (num_bits + 7) / 8);
+        assert_eq!(data.len(), num_bits.div_ceil(8));
         BinaryOps { data, num_bits }
     }
 
@@ -409,8 +398,8 @@ mod tests {
 
     use super::{BinaryNumeralString, FlexibleNumeralString};
     use crate::ff1::{
+        FF1, NumeralString, NumeralStringError,
         test_vectors::{self, AesType},
-        NumeralString, NumeralStringError, FF1,
     };
 
     #[test]
@@ -451,9 +440,10 @@ mod tests {
                 min_len: 20,
             },
         );
-        assert!(ff
-            .encrypt(&[], &BinaryNumeralString::from_bytes_le(&[0; 3]))
-            .is_ok());
+        assert!(
+            ff.encrypt(&[], &BinaryNumeralString::from_bytes_le(&[0; 3]))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -492,9 +482,10 @@ mod tests {
                 min_len: 6,
             },
         );
-        assert!(ff
-            .encrypt(&[], &FlexibleNumeralString::from(vec![0; 6]))
-            .is_ok());
+        assert!(
+            ff.encrypt(&[], &FlexibleNumeralString::from(vec![0; 6]))
+                .is_ok()
+        );
     }
 
     #[test]

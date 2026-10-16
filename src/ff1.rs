@@ -7,8 +7,7 @@
 use core::cmp;
 
 use cipher::{
-    generic_array::GenericArray, Block, BlockCipher, BlockEncrypt, BlockEncryptMut, InnerIvInit,
-    KeyInit,
+    Array, Block, BlockCipherEncrypt, BlockModeEncrypt, InnerIvInit, KeyInit, common::IvState,
 };
 
 #[cfg(test)]
@@ -28,6 +27,9 @@ mod proptests;
 #[cfg(all(test, feature = "alloc"))]
 mod test_vectors;
 
+#[cfg(all(test, feature = "alloc"))]
+mod parameter_tests;
+
 /// The minimum allowed numeral string length for any radix.
 const MIN_NS_LEN: u32 = 2;
 /// The maximum allowed numeral string length for any radix.
@@ -42,8 +44,9 @@ const MIN_NS_DOMAIN_SIZE: u64 = 1_000_000;
 const MIN_RADIX_2_NS_LEN: u32 = 20;
 
 const MAX_TWEAK_LEN: usize = u32::MAX as usize;
-const FIXED_LOG_BITS: u32 = 62;
-const FIXED_LOG_ONE: u128 = 1 << FIXED_LOG_BITS;
+const FIXED_LOG_BITS: u32 = 96;
+const WORKING_LOG_BITS: u32 = 112;
+const WORKING_LOG_ONE: u128 = 1 << WORKING_LOG_BITS;
 
 #[cfg(test)]
 const_assert!((1 << MIN_RADIX_2_NS_LEN) >= MIN_NS_DOMAIN_SIZE);
@@ -71,7 +74,7 @@ impl Radix {
             let log_radix = 31 - radix.leading_zeros();
             Radix::PowerTwo {
                 radix,
-                min_len: cmp::max((MIN_RADIX_2_NS_LEN + log_radix - 1) / log_radix, MIN_NS_LEN),
+                min_len: cmp::max(MIN_RADIX_2_NS_LEN.div_ceil(log_radix), MIN_NS_LEN),
                 log_radix: u8::try_from(log_radix).unwrap(),
             }
         } else {
@@ -108,13 +111,19 @@ impl Radix {
         match *self {
             Radix::Any { radix, .. } => {
                 let scaled_log2 = fixed_log2(radix);
-                let floor_log2 = (scaled_log2 * v as u128) >> FIXED_LOG_BITS;
+                // Split off the integer part so multiplication fits in u128:
+                // the fractional product needs at most 96 + 31 = 127 bits.
+                let floor_log2 = (scaled_log2 >> FIXED_LOG_BITS) * v as u128
+                    + (((scaled_log2 & ((1 << FIXED_LOG_BITS) - 1)) * v as u128) >> FIXED_LOG_BITS);
 
                 // For non-power-of-two radices, radix^v is never a power of 2. Therefore:
                 // ceil(log_256(radix^v)) = floor(log_2(radix^v)) / 8 + 1.
                 (floor_log2 / 8 + 1) as usize
             }
-            Radix::PowerTwo { log_radix, .. } => ((v * log_radix as usize) + 7) / 8,
+            Radix::PowerTwo { log_radix, .. } => {
+                usize::try_from((v as u64 * u64::from(log_radix)).div_ceil(8))
+                    .expect("FF1 half-string byte length exceeds the address space")
+            }
         }
     }
 
@@ -126,22 +135,36 @@ impl Radix {
     }
 }
 
+// Lower approximation with error < 2 * 2^-96. See docs/integer-parameters.md
+// for the rounding bound and the exhaustive certificate over legal radix/v.
 fn fixed_log2(radix: u32) -> u128 {
     debug_assert!((2..=(1 << 16)).contains(&radix));
 
     let integer_bits = 31 - radix.leading_zeros();
-    let mut y = (u128::from(radix) << FIXED_LOG_BITS) >> integer_bits;
+    let mut y = u128::from(radix) << (WORKING_LOG_BITS - integer_bits);
     let mut fractional_bits = 0u128;
 
     for bit in (0..FIXED_LOG_BITS).rev() {
-        y = (y * y) >> FIXED_LOG_BITS;
-        if y >= 2 * FIXED_LOG_ONE {
+        y = square_shift_112(y);
+        if y >= 2 * WORKING_LOG_ONE {
             y >>= 1;
             fractional_bits |= 1u128 << bit;
         }
     }
 
     (u128::from(integer_bits) << FIXED_LOG_BITS) | fractional_bits
+}
+
+// Exact floor(y*y / 2^112), for y < 2^113, without a 256-bit runtime type.
+// Decompose the square into 64-bit limbs, retaining carries before shifting.
+fn square_shift_112(y: u128) -> u128 {
+    let mask = u128::from(u64::MAX);
+    let lo = y & mask;
+    let hi = y >> 64;
+    let cross = lo * hi;
+    let middle = ((lo * lo) >> 64) + ((cross & mask) << 1);
+    let upper = hi * hi + (cross >> 64) * 2 + (middle >> 64);
+    (upper << 16) | ((middle & mask) >> 48)
 }
 
 fn check_tweak_length(tweak_len: usize) -> Result<(), NumeralStringError> {
@@ -156,7 +179,7 @@ fn check_tweak_length(tweak_len: usize) -> Result<(), NumeralStringError> {
 }
 
 fn calculate_padding(tweak_len: usize, b: usize) -> usize {
-    (16 - ((tweak_len + b + 1) % 16)) % 16
+    (16 - ((tweak_len % 16 + b % 16 + 1) % 16)) % 16
 }
 
 /// Type representing FF1 operations that can be performed on a sub-section of a
@@ -202,20 +225,29 @@ pub trait NumeralString: Sized {
     fn concat(a: Self::Ops, b: Self::Ops) -> Self;
 }
 
-#[derive(Clone)]
-struct Prf<CIPH: BlockCipher + BlockEncrypt> {
+struct Prf<CIPH: BlockCipherEncrypt> {
     state: cbc::Encryptor<CIPH>,
     // Contains the output when offset = 0, and partial input otherwise
     buf: [Block<CIPH>; 1],
     offset: usize,
 }
 
-impl<CIPH: BlockCipher + BlockEncrypt + Clone> Prf<CIPH> {
+impl<CIPH: BlockCipherEncrypt + Clone> Prf<CIPH> {
+    fn fork(&self, ciph: &CIPH) -> Self {
+        Self {
+            state: cbc::Encryptor::inner_iv_init(ciph.clone(), &self.state.iv_state()),
+            buf: self.buf.clone(),
+            offset: self.offset,
+        }
+    }
+}
+
+impl<CIPH: BlockCipherEncrypt + Clone> Prf<CIPH> {
     fn new(ciph: &CIPH) -> Self {
         let ciph = ciph.clone();
         Prf {
-            state: cbc::Encryptor::inner_iv_init(ciph, GenericArray::from_slice(&[0; 16])),
-            buf: [Block::<CIPH>::default()],
+            state: cbc::Encryptor::inner_iv_init(ciph, &Array::from_fn(|_| 0)),
+            buf: [Block::<CIPH>::from_fn(|_| 0)],
             offset: 0,
         }
     }
@@ -228,7 +260,7 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> Prf<CIPH> {
             data = &data[to_read..];
 
             if self.offset == self.buf[0].len() {
-                self.state.encrypt_blocks_mut(&mut self.buf);
+                self.state.encrypt_blocks(&mut self.buf);
                 self.offset = 0;
             }
         }
@@ -243,14 +275,14 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> Prf<CIPH> {
     }
 }
 
-fn generate_s<'a, CIPH: BlockEncrypt>(
+fn generate_s<'a, CIPH: BlockCipherEncrypt>(
     ciph: &'a CIPH,
     r: &'a Block<CIPH>,
     d: usize,
 ) -> impl Iterator<Item = u8> + 'a {
     r.clone()
         .into_iter()
-        .chain((1..((d + 15) / 16) as u128).flat_map(move |j| {
+        .chain((1..d.div_ceil(16) as u128).flat_map(move |j| {
             let mut block = r.clone();
             for (b, j) in block.iter_mut().zip(j.to_be_bytes().iter()) {
                 *b ^= j;
@@ -262,23 +294,25 @@ fn generate_s<'a, CIPH: BlockEncrypt>(
 }
 
 /// A struct for performing FF1 encryption and decryption operations.
-pub struct FF1<CIPH: BlockCipher> {
+pub struct FF1<CIPH> {
     ciph: CIPH,
     radix: Radix,
 }
 
-impl<CIPH: BlockCipher + KeyInit> FF1<CIPH> {
+impl<CIPH: KeyInit> FF1<CIPH> {
     /// Creates a new FF1 object for the given key and radix.
     ///
     /// Returns an error if the given radix is not in [2..2^16].
+    ///
+    /// Panics if the key size does not match that expected by the cipher.
     pub fn new(key: &[u8], radix: u32) -> Result<Self, InvalidRadix> {
-        let ciph = CIPH::new(GenericArray::from_slice(key));
+        let ciph = CIPH::new(key.try_into().expect("Invalid key length"));
         let radix = Radix::from_u32(radix)?;
         Ok(FF1 { ciph, radix })
     }
 }
 
-impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
+impl<CIPH: BlockCipherEncrypt + Clone> FF1<CIPH> {
     /// Encrypts the given numeral string.
     ///
     /// Returns an error if the numeral string is not in the required radix.
@@ -307,7 +341,7 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
         let b = self.radix.calculate_b(v);
 
         // 4. Let d = 4 * ceil(b / 4) + 4.
-        let d = 4 * ((b + 3) / 4) + 4;
+        let d = 4 * b.div_ceil(4) + 4;
 
         // 5. Let P = [1, 2, 1] || [radix] || [10] || [u mod 256] || [n] || [t].
         let mut p = [1, 2, 1, 0, 0, 0, 10, u as u8, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -324,7 +358,7 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
             prf.update(&[0]);
         }
         for i in 0..10 {
-            let mut prf = prf.clone();
+            let mut prf = prf.fork(&self.ciph);
             prf.update(&[i]);
             prf.update(x_b.to_be_bytes(self.radix.to_u32(), b).as_ref());
             let r = prf.output();
@@ -378,7 +412,7 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
         let b = self.radix.calculate_b(v);
 
         // 4. Let d = 4 * ceil(b / 4) + 4.
-        let d = 4 * ((b + 3) / 4) + 4;
+        let d = 4 * b.div_ceil(4) + 4;
 
         // 5. Let P = [1, 2, 1] || [radix] || [10] || [u mod 256] || [n] || [t].
         let mut p = [1, 2, 1, 0, 0, 0, 10, u as u8, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -396,7 +430,7 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
         }
         for i in 0..10 {
             let i = 9 - i;
-            let mut prf = prf.clone();
+            let mut prf = prf.fork(&self.ciph);
             prf.update(&[i]);
             prf.update(x_a.to_be_bytes(self.radix.to_u32(), b).as_ref());
             let r = prf.output();
@@ -426,9 +460,11 @@ impl<CIPH: BlockCipher + BlockEncrypt + Clone> FF1<CIPH> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_tweak_length, InvalidRadix, NumeralStringError, Radix, MAX_TWEAK_LEN, MIN_NS_LEN,
-        MIN_RADIX_2_NS_LEN,
+        InvalidRadix, MAX_TWEAK_LEN, MIN_NS_LEN, MIN_RADIX_2_NS_LEN, Radix, check_tweak_length,
     };
+
+    #[cfg(target_pointer_width = "64")]
+    use super::NumeralStringError;
 
     #[cfg(feature = "alloc")]
     use num_bigint::BigUint;
@@ -577,15 +613,21 @@ mod tests {
             for v in 1..=128 {
                 domain *= radix_u32;
                 let max_value = &domain - BigUint::one();
-                let expected = (max_value.bits() as usize + 7) / 8;
+                let expected = (max_value.bits() as usize).div_ceil(8);
                 assert_eq!(radix.calculate_b(v), expected, "radix={radix_u32}, v={v}");
             }
         }
     }
 
     #[test]
-    fn rejects_tweak_lengths_that_do_not_fit_in_p() {
+    fn accepts_maximum_encodable_tweak_length() {
+        assert_eq!(check_tweak_length(0), Ok(()));
         assert_eq!(check_tweak_length(MAX_TWEAK_LEN), Ok(()));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn rejects_tweak_lengths_that_do_not_fit_in_p() {
         assert_eq!(
             check_tweak_length(MAX_TWEAK_LEN.saturating_add(1)),
             Err(NumeralStringError::TweakTooLong {
@@ -593,5 +635,61 @@ mod tests {
                 max_len: MAX_TWEAK_LEN,
             })
         );
+    }
+
+    #[test]
+    fn padding_all_residues_and_address_space_limits() {
+        for t in 0..16 {
+            for b in 0..16 {
+                let pad = super::calculate_padding(t, b);
+                assert!(pad < 16);
+                assert_eq!((t + b + 1 + pad) % 16, 0);
+                assert_eq!(super::calculate_padding(usize::MAX - 15 + t, b), pad);
+                assert_eq!(super::calculate_padding(t, usize::MAX - 15 + b), pad);
+            }
+        }
+        assert_eq!(super::calculate_padding(usize::MAX, usize::MAX), 1);
+    }
+
+    #[test]
+    fn numeral_length_boundaries_without_allocation() {
+        for radix in [2, 3, 10, 16, 65535, 65536] {
+            let radix = Radix::from_u32(radix).unwrap();
+            assert_eq!(radix.check_ns_length(super::MAX_NS_LEN), Ok(()));
+            #[cfg(target_pointer_width = "64")]
+            assert_eq!(
+                radix.check_ns_length(super::MAX_NS_LEN + 1),
+                Err(NumeralStringError::TooLong {
+                    ns_len: super::MAX_NS_LEN + 1,
+                    max_len: super::MAX_NS_LEN,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn prf_fork_preserves_iv_partial_buffer_and_offset() {
+        use cipher::KeyInit;
+        let cipher = aes::Aes128::new_from_slice(&[0x42; 16]).unwrap();
+        let prefix = [0x13; 64];
+        let suffix = [0xa5; 80];
+        for prefix_len in 0..=64 {
+            let mut original = super::Prf::new(&cipher);
+            for chunk in prefix[..prefix_len].chunks(3) {
+                original.update(chunk);
+            }
+            let mut fork = original.fork(&cipher);
+            for chunk in suffix[..80 - prefix_len].chunks(7) {
+                fork.update(chunk);
+            }
+            let mut direct = super::Prf::new(&cipher);
+            direct.update(&prefix[..prefix_len]);
+            direct.update(&suffix[..80 - prefix_len]);
+            assert_eq!(fork.output(), direct.output(), "prefix_len={prefix_len}");
+            // The fork must not mutate the template used by subsequent FF1 rounds.
+            let mut second = original.fork(&cipher);
+            second.update(&suffix[..80 - prefix_len]);
+            assert_eq!(fork.output(), second.output());
+        }
     }
 }

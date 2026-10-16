@@ -39,3 +39,61 @@ compatibility exception. Ciphertexts generated with the incorrect old parameter
 may change; universal compatibility with the baseline is therefore not claimed.
 No multi-gigabyte ciphertext was generated during this investigation. Frozen
 fixtures remain unchanged; this is a parameter-level counterexample.
+
+## Integration and API
+
+The work branch is `codex/update-upstream-0.7.0`. Commit `d353e2d` records
+fixtures before integration. The upstream merge retains both histories; the
+content conflicts in Cargo.toml and ff1.rs were resolved by adopting the new
+cipher/CBC APIs while retaining the fork's validations and allocation gates.
+The fork benchmark type fix remains in place.
+
+The package is fork version 0.2.0, edition 2024, MSRV 1.85. The library manifest
+requests cipher 0.5.1, CBC 0.2, and num-bigint 0.5; dev tests use AES 0.9.
+The upstream lockfile is retained, changing only the package version and
+removing FPE's libm dependency and its now-unneeded package entry. Its concrete
+versions include cipher 0.5.2, CBC 0.2.1 and AES 0.9.2.
+
+The public FF1 calls and numeral traits keep their shape. Cipher implementers
+and consumers must migrate incompatible RustCrypto traits/AES types. No adapter
+is introduced. PRF forks explicitly restore the CBC IV, buffer and partial
+position, with dedicated tests for all prefix lengths 0..=64.
+
+## Validation record
+
+Local environment: macOS arm64, Rust 1.85.0 and stable Rust 1.98.0. The WASI
+runtime is Wasmtime 49.0.0 via an isolated Python installation in /tmp.
+
+| Check | Result |
+| --- | --- |
+| Default and alloc-only host tests, both Rust versions | 24 unit tests, 1 fixture test (672 vectors), 2 validation tests and 1 doctest per configuration |
+| No-feature host tests, both Rust versions | 8 unit tests and 1 gated doctest per configuration |
+| Old -> new -> old independent process exchange | All 672 fixtures decrypt and re-encrypt exactly |
+| Integer parameter calculation | Full legal radix/half-length certificate; original BigUint oracle; adjacent boundaries; large regression case |
+| wasm32-unknown-unknown no_std checks | Both no-feature and alloc-only configurations, Rust 1.85.0 and 1.98.0 |
+| WASI 32-bit default and alloc-only tests | 23 unit tests, all 672 fixtures, 2 validation tests per configuration |
+| WASI 32-bit no-feature tests | 7 unit tests; the excess-u32 tweak/numeral cases are intentionally 64-bit-only |
+| Minimal external consumer | Compiled and ran with Rust 1.85, cipher exactly 0.5.1, CBC exactly 0.2.0 and AES exactly 0.9.2 |
+| Formatting, Clippy and rustdoc | Rust 1.85 formatting; all-target default and lib/tests reduced-feature Clippy on both toolchains; rustdoc with warnings denied |
+| Benchmarks and AES 0.9 example | Compiled benchmarks and ran example on both toolchains |
+| Workflow syntax and whitespace | YAML parsed; git diff --check |
+
+Host matrix commands are the test/Clippy commands in CI, using `--locked` and
+both toolchains. The compatibility command is
+`python3 scripts/check-compatibility.py --toolchain 1.85.0`; it builds the old
+consumer from the immutable baseline SHA and its separate checked-in lockfile.
+The original fixture SHA-256 above remains unchanged.
+
+For local 32-bit execution, the Rust 1.85 `wasm32-wasip1` test binaries were run
+with a Wasmtime WASI runner and `--test-threads=1`. Proptest's subprocess and
+Criterion's rayon defaults are disabled only on WASI; normal host defaults are
+unchanged. WASI tests do not execute target doctests. CI additionally declares
+native i686 Linux tests, Windows/macOS/Linux host tests and the MSRV/stable
+matrix. Those remote jobs have not been executed from this local checkout.
+
+No multi-gigabyte encryption/decryption was attempted. The large-input defect
+and its correction are verified at parameter level with exact integer bounds.
+No Vectis files or other consumers were changed. The pre-existing untracked
+.DS_Store is left untouched. v0.1.0 is unchanged; v0.2.0 has not been created or
+published and requires separate release approval. No registry publication is
+part of this change.

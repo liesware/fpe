@@ -1,8 +1,13 @@
 use aes::{Aes128, Aes192, Aes256};
-use fpe::ff1::{BinaryNumeralString, FlexibleNumeralString, FF1};
+use fpe::ff1::{BinaryNumeralString, FF1, FlexibleNumeralString};
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut result, "{byte:02x}").unwrap();
+    }
+    result
 }
 
 fn unhex(s: &str) -> Vec<u8> {
@@ -100,7 +105,9 @@ pub fn verify_and_encrypt(input: &str) -> String {
 // Run only on 5a221de to establish fixtures; never update expected results on the
 // migrated implementation in response to a mismatch.
 pub fn generate_baseline() -> String {
-    let mut output = String::from("# Synthetic keys only. Generated on 5a221de5fdd75e8c96e3ecbf8f46f2f18a2460d7\n# id\trepresentation\tkey_hex\tradix\ttweak_hex\tplaintext\tciphertext\n");
+    let mut output = String::from(
+        "# Synthetic keys only. Generated on 5a221de5fdd75e8c96e3ecbf8f46f2f18a2460d7\n# id\trepresentation\tkey_hex\tradix\ttweak_hex\tplaintext\tciphertext\n",
+    );
     for key_len in [16, 24, 32] {
         let key: Vec<u8> = (0..key_len).map(|i| (i * 7 + key_len) as u8).collect();
         for radix in [2u32, 3, 10, 16, 36, 256, 65535, 65536] {

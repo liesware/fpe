@@ -2,98 +2,90 @@ name: CI checks
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
-  build:
-    name: Build target ${{ matrix.target }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - wasm32-wasi
-
-    steps:
-      - uses: actions/checkout@v3
-      - name: Add target
-        run: rustup target add ${{ matrix.target }}
-      - name: cargo build
-        run: cargo build --verbose --no-default-features
-
   test:
-    name: Test on ${{ matrix.os }}
+    name: Tests (${{ matrix.os }}, Rust ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
-
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [1.85.0, stable]
     steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@1.60.0
-        id: toolchain
-      - run: rustup override set ${{steps.toolchain.outputs.name}}
-      - name: Run tests
-        run: cargo test --verbose
-
-  bitrot:
-    name: Bitrot check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@1.60.0
-        id: toolchain
-      - run: rustup override set ${{steps.toolchain.outputs.name}}
-      # Build benchmarks to prevent bitrot
-      - name: Build benchmarks
-        run: cargo build --all --benches
-
-  clippy-test:
-    name: Clippy (MSRV)
-    timeout-minutes: 30
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@1.60.0
-        id: toolchain
-      - run: rustup override set ${{steps.toolchain.outputs.name}}
-      - run: rustup component add clippy
-      - name: Run clippy
-        uses: actions-rs/clippy-check@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: Clippy (MSRV)
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features --all-targets -- -D warnings
+          persist-credentials: false
+      - run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - run: cargo +${{ matrix.rust }} test --locked
+      - run: cargo +${{ matrix.rust }} test --locked --no-default-features --features alloc
+      - run: cargo +${{ matrix.rust }} test --locked --no-default-features
+      - run: cargo +${{ matrix.rust }} build --locked --benches
+      - run: cargo +${{ matrix.rust }} run --locked --example aes09
 
-  clippy-beta:
-    name: Clippy (beta)
-    timeout-minutes: 30
+  no-std:
+    name: no_std (${{ matrix.rust }}, ${{ matrix.features }})
     runs-on: ubuntu-latest
-    continue-on-error: true
+    strategy:
+      matrix:
+        rust: [1.85.0, stable]
+        features: [none, alloc]
     steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@beta
-        id: toolchain
-      - run: rustup override set ${{steps.toolchain.outputs.name}}
-      - run: rustup component add clippy
-      - name: Run Clippy (beta)
-        uses: actions-rs/clippy-check@v1
-        continue-on-error: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: Clippy (beta)
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features --all-targets -- -W clippy::all
+          persist-credentials: false
+      - run: rustup toolchain install ${{ matrix.rust }} --profile minimal --target wasm32-unknown-unknown
+      - if: matrix.features == 'none'
+        run: cargo +${{ matrix.rust }} check --locked --target wasm32-unknown-unknown --no-default-features
+      - if: matrix.features == 'alloc'
+        run: cargo +${{ matrix.rust }} check --locked --target wasm32-unknown-unknown --no-default-features --features alloc
 
-  doc-links:
-    name: Intra-doc links
+  test-32-bit:
+    name: Native 32-bit tests (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [1.85.0, stable]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      - run: rustup toolchain install ${{ matrix.rust }} --profile minimal --target i686-unknown-linux-gnu
+      - run: cargo +${{ matrix.rust }} test --locked --target i686-unknown-linux-gnu
+      - run: cargo +${{ matrix.rust }} test --locked --target i686-unknown-linux-gnu --no-default-features --features alloc
+      - run: cargo +${{ matrix.rust }} test --locked --target i686-unknown-linux-gnu --no-default-features
+
+  lint:
+    name: Clippy (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [1.85.0, stable]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install ${{ matrix.rust }} --profile minimal --component clippy
+      - run: cargo +${{ matrix.rust }} clippy --locked --all-targets -- -D warnings
+      - run: cargo +${{ matrix.rust }} clippy --locked --no-default-features --features alloc --lib --tests -- -D warnings
+      - run: cargo +${{ matrix.rust }} clippy --locked --no-default-features --lib --tests -- -D warnings
+
+  compatibility-and-docs:
+    name: Compatibility, formatting and documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      # Requires #![deny(rustdoc::broken_intra_doc_links)] in crates.
-      - name: Check intra-doc links
-        run: cargo doc --document-private-items
-
-  fmt:
-    name: Rustfmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Check formatting
-        run: cargo fmt -- --check
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install 1.85.0 --profile minimal --component rustfmt
+      - run: python3 scripts/check-compatibility.py
+      - run: python3 scripts/reproduce-precision.py
+      - run: cargo +1.85.0 fmt -- --check
+      - run: cargo +1.85.0 doc --locked --all-features --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: git diff --check
