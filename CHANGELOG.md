@@ -5,12 +5,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this library adheres to Rust's notion of
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Fork 0.2.0 — Unreleased
+
+### Changed
+- Merge upstream 0.7.0 (`e2654af6072f4d83588a29064f97ccbdb04eb34e`).
+- Rust 1.85 / edition 2024, cipher 0.5.1, CBC 0.2, num-bigint 0.5;
+  AES 0.9 in tests/examples. Consumers using AES 0.8 or cipher 0.4 must migrate.
+- Keep the fork's integer parameter calculation, tweak rejection, padding,
+  feature support and tests; do not restore the direct libm dependency.
+
+### Fixed
+- Increase fixed-log precision with a full-domain integer certificate. The old
+  62-bit calculation underestimates b for radix 56 and v=1766948378. This is an
+  explicitly approved compatibility exception for affected large inputs;
+  ciphertexts produced with the incorrect old parameter may differ.
+- Avoid padding intermediate overflow and distinguish 32-/64-bit tweak limits.
+
+### Added
+- 672 unchanged synthetic-key fixtures recorded before migration, old/new
+  process compatibility checks, parameter certificate and an AES 0.9 example.
+- Feature-matrix/MSRV CI, no_std target checks and native 32-bit tests.
+
+## Fork 0.1.0
+
 ### Changed
 - Added compatibility updates for the 2025 second public draft of NIST SP
   800-38G Revision 1: FF1 parameter calculation no longer uses floating-point
   arithmetic, and tweaks longer than the FF1 parameter block can encode are now
   rejected.
+
+The versions below belong to upstream, not to the fork's release sequence.
+
+## [0.7.0] - 2026-09-30
+### Changed
+- MSRV is now 1.85.0.
+- Bumped dependencies to `cipher 0.5.1`, `cbc 0.2`.
+  - `aes 0.9` is now the minimum compatible crate version.
 
 ## [0.6.1] - 2023-04-13
 ### Fixed
